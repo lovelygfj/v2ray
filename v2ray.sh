@@ -10,7 +10,7 @@ none='\e[0m'
 # Root
 [[ $(id -u) != 0 ]] && echo -e " 哎呀……请使用 ${red}root ${none}用户运行 ${yellow}~(^_^) ${none}" && exit 1
 
-_version="v3.42"
+_version="v3.67"
 
 cmd="apt-get"
 
@@ -84,10 +84,43 @@ v2ray_client_config="/etc/v2ray/233blog_v2ray_config.json"
 v2ray_pid=$(pgrep -f /usr/bin/v2ray/v2ray)
 caddy_pid=$(pgrep -f /usr/local/bin/caddy)
 _v2ray_sh="/usr/local/sbin/v2ray"
-v2ray_ver="$(/usr/bin/v2ray/v2ray -version | head -n 1 | cut -d " " -f2)"
+
+/usr/bin/v2ray/v2ray -version >/dev/null 2>&1
+if [[ $? == 0 ]]; then
+	v2ray_ver="$(/usr/bin/v2ray/v2ray -version | head -n 1 | cut -d " " -f2)"
+else
+	v2ray_ver="$(/usr/bin/v2ray/v2ray version | head -n 1 | cut -d " " -f2)"
+	v2ray_ver_v5=1
+fi
+
 . /etc/v2ray/233boy/v2ray/src/init.sh
 systemd=true
 # _test=true
+
+# fix VMessAEAD
+if [[ ! $(grep 'run -config' /lib/systemd/system/v2ray.service)  && $v2ray_ver_v5 ]]; then
+	_load download-v2ray.sh
+	_install_v2ray_service
+	systemctl daemon-reload
+	systemctl restart v2ray
+fi
+
+# fix caddy2 config
+if [[ $caddy ]]; then
+	/usr/local/bin/caddy version >/dev/null 2>&1
+	if [[ $? == 1 ]]; then
+		echo -e "\n $yellow 警告: 脚本将自动更新 Caddy 版本。 $none  \n"
+		systemctl stop caddy
+		_load download-caddy.sh
+		_download_caddy_file
+		_install_caddy_service
+		systemctl daemon-reload
+		_load caddy-config.sh
+		systemctl restart caddy
+		echo -e "\n $green 更新 Caddy 版本完成, 要是出问题了你可以重装解决。 $none  \n"
+		exit 0
+	fi
+fi
 
 if [[ $v2ray_ver != v* ]]; then
 	v2ray_ver="v$v2ray_ver"
@@ -111,10 +144,6 @@ fi
 
 _load transport.sh
 ciphers=(
-	aes-128-cfb
-	aes-256-cfb
-	chacha20
-	chacha20-ietf
 	aes-128-gcm
 	aes-256-gcm
 	chacha20-ietf-poly1305
@@ -143,6 +172,10 @@ create_vmess_URL_config() {
 				"path": "$_path",
 				"tls": "tls"
 			}
+		EOF
+	elif [[ $v2ray_transport == 33 ]]; then
+		cat >/etc/v2ray/vmess_qr.json <<-EOF
+			vless://${v2ray_id}@${domain}:443?encryption=none&security=tls&type=ws&host=${domain}&path=${_path}#233v2_${domain}
 		EOF
 	else
 		[[ -z $ip ]] && get_ip
@@ -409,17 +442,17 @@ shadowsocks_password_config() {
 shadowsocks_ciphers_config() {
 
 	while :; do
-		echo -e "请选择 "$yellow"Shadowsocks"$none" 加密协议 [${magenta}1-7$none]"
+		echo -e "请选择 "$yellow"Shadowsocks"$none" 加密协议 [${magenta}1-3$none]"
 		for ((i = 1; i <= ${#ciphers[*]}; i++)); do
 			ciphers_show="${ciphers[$i - 1]}"
 			echo
 			echo -e "$yellow $i. $none${ciphers_show}"
 		done
 		echo
-		read -p "$(echo -e "(默认加密协议: ${cyan}${ciphers[6]}$none)"):" ssciphers_opt
-		[ -z "$ssciphers_opt" ] && ssciphers_opt=7
+		read -p "$(echo -e "(默认加密协议: ${cyan}${ciphers[1]}$none)"):" ssciphers_opt
+		[ -z "$ssciphers_opt" ] && ssciphers_opt=2
 		case $ssciphers_opt in
-		[1-7])
+		[1-3])
 			new_ssciphers=${ciphers[$ssciphers_opt - 1]}
 			echo
 			echo
@@ -554,7 +587,7 @@ change_shadowsocks_ciphers() {
 		read -p "$(echo -e "(当前加密协议: ${cyan}${ssciphers}$none)"):" ssciphers_opt
 		[ -z "$ssciphers_opt" ] && error && continue
 		case $ssciphers_opt in
-		[1-7])
+		[1-3])
 			new_ssciphers=${ciphers[$ssciphers_opt - 1]}
 			if [[ $new_ssciphers == $ssciphers ]]; then
 				echo
@@ -1730,18 +1763,18 @@ change_proxy_site_config() {
 }
 domain_check() {
 	# test_domain=$(dig $new_domain +short)
-	# test_domain=$(ping $new_domain -c 1 -4 | grep -oE -m1 "([0-9]{1,3}\.){3}[0-9]{1,3}")
+	test_domain=$(ping $new_domain -c 1 -W 2 | head -1)
 	# test_domain=$(wget -qO- --header='accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$new_domain&type=A" | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -1)
-	test_domain=$(curl -sH 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$new_domain&type=A" | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -1)
-	if [[ $test_domain != $ip ]]; then
+	# test_domain=$(curl -sH 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$new_domain&type=A" | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -1)
+	if [[ ! $(echo $test_domain | grep $ip) ]]; then
 		echo
 		echo -e "$red 检测域名解析错误....$none"
 		echo
 		echo -e " 你的域名: $yellow$new_domain$none 未解析到: $cyan$ip$none"
 		echo
-		echo -e " 你的域名当前解析到: $cyan$test_domain$none"
+		echo -e " PING 测试结果: $cyan$test_domain$none"
 		echo
-		echo "备注...如果你的域名是使用 Cloudflare 解析的话..在 Status 那里点一下那图标..让它变灰"
+		echo "备注...如果你的域名是使用 Cloudflare 解析的话..在 DNS 那, 将 (Proxy status / 代理状态), 设置成 (DNS only / 仅限 DNS)"
 		echo
 		exit 1
 	fi
@@ -2268,7 +2301,11 @@ get_v2ray_config_qr_link() {
 }
 get_v2ray_vmess_URL_link() {
 	create_vmess_URL_config
-	local vmess="vmess://$(cat /etc/v2ray/vmess_qr.json | base64 -w 0)"
+	if [[ $v2ray_transport == 33 ]]; then
+		local vmess="$(cat /etc/v2ray/vmess_qr.json)"
+	else
+		local vmess="vmess://$(cat /etc/v2ray/vmess_qr.json | base64 -w 0)"
+	fi
 	echo
 	echo "---------- V2Ray vmess URL / V2RayNG v0.4.1+ / V2RayN v2.1+ / 仅适合部分客户端 -------------"
 	echo
@@ -2283,25 +2320,13 @@ other() {
 		echo
 		echo -e "$yellow 1. $none安装 BBR"
 		echo
-		echo -e "$yellow 2. $none安装 LotServer(锐速)"
-		echo
-		echo -e "$yellow 3. $none卸载 LotServer(锐速)"
-		echo
-		read -p "$(echo -e "请选择 [${magenta}1-3$none]:")" _opt
+		read -p "$(echo -e "请选择 [${magenta}1$none]:")" _opt
 		if [[ -z $_opt ]]; then
 			error
 		else
 			case $_opt in
 			1)
 				install_bbr
-				break
-				;;
-			2)
-				install_lotserver
-				break
-				;;
-			3)
-				uninstall_lotserver
 				break
 				;;
 			*)
@@ -2323,18 +2348,6 @@ install_bbr() {
 		_try_enable_bbr
 		[[ ! $enable_bbr ]] && bash <(curl -s -L https://github.com/teddysun/across/raw/master/bbr.sh)
 	fi
-}
-install_lotserver() {
-	# https://moeclub.org/2017/03/08/14/
-	wget --no-check-certificate -qO /tmp/appex.sh "https://raw.githubusercontent.com/0oVicero0/serverSpeeder_Install/master/appex.sh"
-	bash /tmp/appex.sh 'install'
-	rm -rf /tmp/appex.sh
-}
-uninstall_lotserver() {
-	# https://moeclub.org/2017/03/08/14/
-	wget --no-check-certificate -qO /tmp/appex.sh "https://raw.githubusercontent.com/0oVicero0/serverSpeeder_Install/master/appex.sh"
-	bash /tmp/appex.sh 'uninstall'
-	rm -rf /tmp/appex.sh
 }
 
 update() {
@@ -2521,15 +2534,17 @@ backup_config() {
 }
 
 get_ip() {
-	ip=$(curl -s https://ipinfo.io/ip)
-	[[ -z $ip ]] && ip=$(curl -s https://api.ip.sb/ip)
-	[[ -z $ip ]] && ip=$(curl -s https://api.ipify.org)
-	[[ -z $ip ]] && ip=$(curl -s https://ip.seeip.org)
-	[[ -z $ip ]] && ip=$(curl -s https://ifconfig.co/ip)
-	[[ -z $ip ]] && ip=$(curl -s https://api.myip.com | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}")
-	[[ -z $ip ]] && ip=$(curl -s icanhazip.com)
-	[[ -z $ip ]] && ip=$(curl -s myip.ipip.net | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}")
-	[[ -z $ip ]] && echo -e "\n$red 这垃圾小鸡扔了吧！$none\n" && exit
+	# ip=$(curl -s https://ipinfo.io/ip)
+	# [[ -z $ip ]] && ip=$(curl -s https://api.ip.sb/ip)
+	# [[ -z $ip ]] && ip=$(curl -s https://api.ipify.org)
+	# [[ -z $ip ]] && ip=$(curl -s https://ip.seeip.org)
+	# [[ -z $ip ]] && ip=$(curl -s https://ifconfig.co/ip)
+	# [[ -z $ip ]] && ip=$(curl -s https://api.myip.com | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}")
+	# [[ -z $ip ]] && ip=$(curl -s icanhazip.com)
+	# [[ -z $ip ]] && ip=$(curl -s myip.ipip.net | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}")
+	export "$(wget -4 -qO- https://dash.cloudflare.com/cdn-cgi/trace | grep ip=)" >/dev/null 2>&1
+	[[ -z $ip ]] && export "$(wget -6 -qO- https://dash.cloudflare.com/cdn-cgi/trace | grep ip=)" >/dev/null 2>&1
+	[[ -z $ip ]] && echo -e "\n$red 获取IP失败, 这垃圾小鸡扔了吧！$none\n" && exit
 }
 
 error() {
@@ -2604,8 +2619,6 @@ menu() {
 		echo "TG 频道: https://t.me/tg2333"
 		echo
 		echo "捐赠脚本作者: https://233v2.com/donate/"
-		echo
-		echo "捐助 V2Ray: https://www.v2ray.com/chapter_00/02_donate.html"
 		echo
 		echo -e "$yellow  1. $none查看 V2Ray 配置"
 		echo
@@ -2708,12 +2721,6 @@ L | infolink)
 	get_v2ray_config_info_link
 	;;
 q | qr)
-	if [[ $v2ray_transport == 33 ]]; then
-		echo
-		echo ' V2RAY VLESS 协议相关暂不支持生成 ....'
-		echo
-		exit
-	fi
 	get_v2ray_config_qr_link
 	;;
 s | ss)
@@ -2781,12 +2788,6 @@ log)
 	view_v2ray_log
 	;;
 url | URL)
-	if [[ $v2ray_transport == 33 ]]; then
-		echo
-		echo ' V2RAY VLESS 协议相关暂不支持生成 URL ....'
-		echo
-		exit
-	fi
 	get_v2ray_vmess_URL_link
 	;;
 u | update)
