@@ -124,7 +124,7 @@ get_uuid() {
 }
 
 get_ip() {
-    [[ $ip || $is_no_auto_tls || $is_gen ]] && return
+    [[ $ip || $is_no_auto_tls || $is_gen || $is_dont_get_ip ]] && return
     export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
     [[ ! $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
     [[ ! $ip ]] && {
@@ -167,7 +167,7 @@ show_list() {
 is_test() {
     case $1 in
     number)
-        echo $2 | egrep '^[1-9][0-9]?+$'
+        echo $2 | grep -E '^[1-9][0-9]?+$'
         ;;
     port)
         if [[ $(is_test number $2) ]]; then
@@ -178,13 +178,13 @@ is_test() {
         [[ $(is_port_used $2) && ! $is_cant_test_port ]] && echo ok
         ;;
     domain)
-        echo $2 | egrep -i '^\w(\w|\-|\.)?+\.\w+$'
+        echo $2 | grep -E -i '^\w(\w|\-|\.)?+\.\w+$'
         ;;
     path)
-        echo $2 | egrep -i '^\/\w(\w|\-|\/)?+\w$'
+        echo $2 | grep -E -i '^\/\w(\w|\-|\/)?+\w$'
         ;;
     uuid)
-        echo $2 | egrep -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        echo $2 | grep -E -i '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
         ;;
     esac
 
@@ -384,6 +384,13 @@ create() {
         get info $2
         [[ ! $is_client_id_json ]] && err "($is_config_name) 不支持生成客户端配置."
         is_new_json=$(jq '{outbounds:[{tag:'\"$is_config_name\"',protocol:'\"$is_protocol\"','"$is_client_id_json"','"$is_stream"'}]}' <<<{})
+        if [[ $is_full_client ]]; then
+            is_dns='dns:{servers:[{address:"223.5.5.5",domain:["geosite:cn","geosite:geolocation-cn"],expectIPs:["geoip:cn"]},"1.1.1.1","8.8.8.8"]}'
+            is_route='routing:{rules:[{type:"field",outboundTag:"direct",ip:["geoip:cn","geoip:private"]},{type:"field",outboundTag:"direct",domain:["geosite:cn","geosite:geolocation-cn"]}]}'
+            is_inbounds='inbounds:[{port:2333,listen:"127.0.0.1",protocol:"socks",settings:{udp:true},sniffing:{enabled:true,destOverride:["http","tls"]}}]'
+            is_outbounds='outbounds:[{tag:'\"$is_config_name\"',protocol:'\"$is_protocol\"','"$is_client_id_json"','"$is_stream"'},{tag:"direct",protocol:"freedom"}]'
+            is_new_json=$(jq '{'$is_dns,$is_route,$is_inbounds,$is_outbounds'}' <<<{})
+        fi
         msg
         jq <<<$is_new_json
         msg
@@ -518,7 +525,7 @@ change() {
     1)
         # new port
         is_new_port=$3
-        [[ $host && ! $is_caddy ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
+        [[ $host && ! $is_caddy || $is_no_auto_tls ]] && err "($is_config_file) 不支持更改端口, 因为没啥意义."
         if [[ $is_new_port && ! $is_auto ]]; then
             [[ ! $(is_test port $is_new_port) ]] && err "请输入正确的端口, 可选(1-65535)"
             [[ $is_new_port != 443 && $(is_test port_used $is_new_port) ]] && err "无法使用 ($is_new_port) 端口"
@@ -527,7 +534,7 @@ change() {
         [[ ! $is_new_port ]] && ask string is_new_port "请输入新端口:"
         if [[ $is_caddy && $host ]]; then
             net=$is_old_net
-            tlsport=$is_new_port
+            is_https_port=$is_new_port
             load caddy.sh
             caddy_config $net
             manage restart caddy &
@@ -725,6 +732,8 @@ change() {
 
 # delete config.
 del() {
+    # dont get ip
+    is_dont_get_ip=1
     [[ $is_conf_dir_empty ]] && return # not found any json file.
     # get a config file
     [[ ! $is_config_file ]] && get info $1
@@ -744,7 +753,7 @@ del() {
                 [[ ! $old_host ]] && return # no host exist or not set new host;
                 is_del_host=$old_host
             }
-            [[ $is_del_host && $host != $old_host ]] && {
+            [[ $is_del_host && $host != $old_host && ! $is_no_auto_tls ]] && {
                 rm -rf $is_caddy_conf/$is_del_host.conf $is_caddy_conf/$is_del_host.conf.add
                 [[ ! $is_new_json ]] && manage restart caddy &
             }
@@ -754,6 +763,7 @@ del() {
         warn "当前配置目录为空! 因为你刚刚删除了最后一个配置文件."
         is_conf_dir_empty=1
     fi
+    unset is_dont_get_ip
     [[ $is_dont_auto_exit ]] && unset is_config_file
 }
 
@@ -768,7 +778,7 @@ uninstall() {
     manage stop &>/dev/null
     manage disable &>/dev/null
     rm -rf $is_core_dir $is_log_dir $is_sh_bin /lib/systemd/system/$is_core.service
-    sed -i "/alias $is_core=/d" /root/.bashrc
+    sed -i "/$is_core/d" /root/.bashrc
     # uninstall caddy; 2 is ask result
     if [[ $REPLY == '2' ]]; then
         manage stop caddy &>/dev/null
@@ -901,7 +911,7 @@ add() {
             ;;
         *)
             for v in ${protocol_list[@]}; do
-                [[ $(egrep -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
+                [[ $(grep -E -i "^$is_lower$" <<<$v) ]] && is_new_protocol=$v && break
             done
 
             [[ ! $is_new_protocol ]] && err "无法识别 ($1), 请使用: $is_core add [protocol] [args... | auto]"
@@ -978,17 +988,18 @@ add() {
             ;;
         kcp | quic)
             kcp_seed=
-            [[ $(grep tcp <<<$is_new_protocol) ]] && header_type=
+            [[ $(grep -i tcp <<<$is_new_protocol) ]] && header_type=
             ;;
         h2 | ws | grpc)
             old_host=$host
             if [[ ! $is_use_tls ]]; then
-                host=
+                unset host is_no_auto_tls
             else
                 [[ $is_old_net == 'grpc' ]] && {
                     path=/$path
                 }
             fi
+            [[ ! $(grep -i trojan <<<$is_new_protocol) ]] && is_trojan=
             ;;
         reality)
             [[ ! $(grep -i reality <<<$is_new_protocol) ]] && is_reality=
@@ -1001,7 +1012,7 @@ add() {
             is_dynamic_port=
         }
 
-        [[ $is_trojan && ! $(is_test uuid $trojan_password) ]] && uuid=
+        [[ ! $(is_test uuid $uuid) ]] && uuid=
     fi
 
     # no-auto-tls only use h2,ws,grpc
@@ -1050,7 +1061,7 @@ add() {
                 ask set_header_type
             }
             for v in ${is_tmp_list[@]}; do
-                [[ $(egrep -i "^${is_use_header_type}${is_use_method}$" <<<$v) ]] && is_tmp_use_type=$v && break
+                [[ $(grep -E -i "^${is_use_header_type}${is_use_method}$" <<<$v) ]] && is_tmp_use_type=$v && break
             done
             [[ ! ${is_tmp_use_type} ]] && {
                 warn "(${is_use_header_type}${is_use_method}) 不是一个可用的${is_tmp_use_name}."
@@ -1079,9 +1090,15 @@ add() {
         if [[ ! $is_no_auto_tls && ! $is_caddy && ! $is_gen ]]; then
             # test auto tls
             [[ $(is_test port_used 80) || $(is_test port_used 443) ]] && {
-                warn "端口 (80 或 443) 已经被占用, 无法完成自动配置 TLS. 请考虑使用 no-auto-tls"
-                msg "\e[41m帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)\n"
-                exit 1
+                get_port
+                is_http_port=$tmp_port
+                get_port
+                is_https_port=$tmp_port
+                warn "端口 (80 或 443) 已经被占用, 你也可以考虑使用 no-auto-tls"
+                msg "\e[41m no-auto-tls 帮助(help)\e[0m: $(msg_ul https://233boy.com/$is_core/no-auto-tls/)\n"
+                msg "\n Caddy 将使用非标准端口实现自动配置 TLS, HTTP:$is_http_port HTTPS:$is_https_port\n"
+                msg "请确定是否继续???"
+                pause
             }
             is_install_caddy=1
         fi
@@ -1170,6 +1187,7 @@ get() {
         [[ ! $is_addr ]] && {
             get_ip
             is_addr=$ip
+            [[ $(grep ":" <<<$ip) ]] && is_addr="[$ip]"
         }
         ;;
     new)
@@ -1180,8 +1198,8 @@ get() {
     file)
         is_file_str=$2
         [[ ! $is_file_str ]] && is_file_str='.json$'
-        # is_all_json=("$(ls $is_conf_dir | egrep $is_file_str)")
-        readarray -t is_all_json <<<"$(ls $is_conf_dir | egrep -i "$is_file_str" | sed '/dynamic-port-.*-link/d' | head -233)" # limit max 233 lines for show.
+        # is_all_json=("$(ls $is_conf_dir | grep -E $is_file_str)")
+        readarray -t is_all_json <<<"$(ls $is_conf_dir | grep -E -i "$is_file_str" | sed '/dynamic-port-.*-link/d' | head -233)" # limit max 233 lines for show.
         [[ ! $is_all_json ]] && err "无法找到相关的配置文件: $2"
         [[ ${#is_all_json[@]} -eq 1 ]] && is_config_file=$is_all_json && is_auto_get_config=1
         [[ ! $is_config_file ]] && {
@@ -1226,10 +1244,13 @@ get() {
                 [[ $? != 0 ]] && err "无法读取动态端口文件: $is_dynamic_port"
             fi
             if [[ $is_caddy && $host && -f $is_caddy_conf/$host.conf ]]; then
-                tmp_tlsport=$(egrep -o "$host:[1-9][0-9]?+" $is_caddy_conf/$host.conf | sed s/.*://)
+                is_tmp_https_port=$(grep -E -o "$host:[1-9][0-9]?+" $is_caddy_conf/$host.conf | sed s/.*://)
             fi
-            [[ $tmp_tlsport ]] && tlsport=$tmp_tlsport
-            [[ $is_client && $host ]] && port=$tlsport
+            if [[ $host && ! -f $is_caddy_conf/$host.conf ]]; then
+                is_no_auto_tls=1
+            fi
+            [[ $is_tmp_https_port ]] && is_https_port=$is_tmp_https_port
+            [[ $is_client && $host ]] && port=$is_https_port
             get protocol $is_protocol-$net
         fi
         ;;
@@ -1289,7 +1310,7 @@ get() {
             net=socks
             [[ ! $is_socks_user ]] && is_socks_user=233boy
             [[ ! $is_socks_pass ]] && is_socks_pass=$uuid
-            json_str='settings:{auth:"password",accounts:[{user:'\"$is_socks_user\"',pass:'\"$is_socks_pass\"'}],udp:true}'
+            json_str='settings:{auth:"password",accounts:[{user:'\"$is_socks_user\"',pass:'\"$is_socks_pass\"'}],udp:true,ip:"0.0.0.0"}'
             ;;
         *)
             err "无法识别协议: $is_config_file"
@@ -1501,26 +1522,25 @@ info() {
             is_url_path=serviceName
         }
         [[ $is_protocol == 'vmess' ]] && {
-            is_vmess_url=$(jq -c '{v:2,ps:'\"233boy-$net-$host\"',add:'\"$is_addr\"',port:'\"$tlsport\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
+            is_vmess_url=$(jq -c '{v:2,ps:'\"233boy-$net-$host\"',add:'\"$is_addr\"',port:'\"$is_https_port\"',id:'\"$uuid\"',aid:"0",net:'\"$net\"',host:'\"$host\"',path:'\"$path\"',tls:'\"tls\"'}' <<<{})
             is_url=vmess://$(echo -n $is_vmess_url | base64 -w 0)
         } || {
             [[ $is_trojan ]] && {
                 uuid=$trojan_password
-                is_info_str=($is_protocol $is_addr $tlsport $trojan_password $net $host $path 'tls')
                 is_can_change=(0 1 2 3 4)
                 is_info_show=(0 1 2 10 4 6 7 8)
             }
-            is_url="$is_protocol://$uuid@$host:$tlsport?encryption=none&security=tls&type=$net&host=$host&${is_url_path}=$(sed 's#/#%2F#g' <<<$path)#233boy-$net-$host"
+            is_url="$is_protocol://$uuid@$host:$is_https_port?encryption=none&security=tls&type=$net&host=$host&${is_url_path}=$(sed 's#/#%2F#g' <<<$path)#233boy-$net-$host"
         }
         [[ $is_caddy ]] && is_can_change+=(13)
-        is_info_str=($is_protocol $is_addr $tlsport $uuid $net $host $path 'tls')
+        is_info_str=($is_protocol $is_addr $is_https_port $uuid $net $host $path 'tls')
         ;;
     reality)
         is_color=41
         is_can_change=(0 1 5 10 11)
         is_info_show=(0 1 2 3 15 8 16 17 18)
         is_info_str=($is_protocol $is_addr $port $uuid xtls-rprx-vision reality $is_servername "ios" $is_public_key)
-        is_url="$is_protocol://$uuid@$ip:$port?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp&sni=$is_servername&pbk=$is_public_key&fp=ios#233boy-$net-$is_addr"
+        is_url="$is_protocol://$uuid@$is_addr:$port?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp&sni=$is_servername&pbk=$is_public_key&fp=ios#233boy-$net-$is_addr"
         ;;
     door)
         is_can_change=(0 1 8 9)
@@ -1550,6 +1570,9 @@ info() {
         fi
         msg "$a $tt= \e[${is_color}m${is_info_str[$i]}\e[0m"
     done
+    if [[ $is_new_install ]]; then
+        warn "首次安装请查看脚本帮助文档: $(msg_ul https://233boy.com/$is_core/$is_core-script/)"
+    fi
     if [[ $is_url ]]; then
         msg "------------- ${info_list[12]} -------------"
         msg "\e[4;${is_color}m${is_url}\e[0m"
@@ -1700,7 +1723,7 @@ is_main_menu() {
         show_help
         ;;
     9)
-        ask list is_do_other "启用BBR 查看日志 查看错误日志 测试运行 重装脚本"
+        ask list is_do_other "启用BBR 查看日志 查看错误日志 测试运行 重装脚本 设置DNS"
         case $REPLY in
         1)
             load bbr.sh
@@ -1717,6 +1740,10 @@ is_main_menu() {
             ;;
         5)
             get reinstall
+            ;;
+        6)
+            load dns.sh
+            dns_set
             ;;
         esac
         ;;
@@ -1756,6 +1783,7 @@ main() {
         change ${@:2}
         ;;
     client | genc)
+        [[ $1 == 'client' ]] && is_full_client=1
         create client $2
         ;;
     d | del | rm)
@@ -1795,6 +1823,10 @@ main() {
         [[ $is_api_fail ]] && manage restart &
         [[ $is_del_host ]] && manage restart caddy &
         ;;
+    dns)
+        load dns.sh
+        dns_set ${@:2}
+        ;;
     debug)
         is_debug=1
         get info $2
@@ -1820,8 +1852,9 @@ main() {
         get_ip
         msg $ip
         ;;
-    log | logerr)
-        get $@
+    log | logerr | errlog)
+        load log.sh
+        log_set $@
         ;;
     url | qr)
         url_qr $@
@@ -1837,7 +1870,14 @@ main() {
             is_update_name=sh
             is_update_ver=
         }
-        update $is_update_name $is_update_ver
+        if [[ $2 == 'dat' ]]; then
+            load download.sh
+            download dat
+            msg "$(_green 更新 geoip.dat geosite.dat 成功.)\n"
+            manage restart &
+        else
+            update $is_update_name $is_update_ver
+        fi
         ;;
     ssss | ss2022)
         get $@

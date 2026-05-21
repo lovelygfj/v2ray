@@ -13,7 +13,7 @@ get_latest_version() {
         url="https://api.github.com/repos/$is_caddy_repo/releases/latest?v=$RANDOM"
         ;;
     esac
-    latest_ver=$(_wget -qO- $url | grep tag_name | egrep -o 'v([0-9.]+)')
+    latest_ver=$(_wget -qO- $url | grep tag_name | grep -E -o 'v([0-9.]+)')
     [[ ! $latest_ver ]] && {
         err "获取 ${name} 最新版本失败."
     }
@@ -21,7 +21,7 @@ get_latest_version() {
 }
 download() {
     latest_ver=$2
-    [[ ! $latest_ver ]] && get_latest_version $1
+    [[ ! $latest_ver && $1 != 'dat' ]] && get_latest_version $1
     # tmp dir
     tmpdir=$(mktemp -u)
     [[ ! $tmpdir ]] && {
@@ -44,6 +44,17 @@ download() {
         download_file
         unzip -qo $tmpfile -d $is_sh_dir
         chmod +x $is_sh_bin
+        ;;
+    dat)
+        name="geoip.dat"
+        tmpfile=$tmpdir/geoip.dat
+        link="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+        download_file
+        name="geosite.dat"
+        tmpfile=$tmpdir/geosite.dat
+        link="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+        download_file
+        cp -f $tmpdir/*.dat $is_core_dir/bin/
         ;;
     caddy)
         name="Caddy"
